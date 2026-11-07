@@ -1,6 +1,6 @@
 import AppKit
 
-/// An app icon left of the window buttons: a Dock pin, or a running app the bar has no window button for.
+/// An app icon right of the window buttons: a Dock pin, or a running app the bar has no window button for.
 struct PinnedApp {
     let url: URL
     /// Bundle id if it has one, else the path: what matches a pinned app to a running one.
@@ -43,7 +43,7 @@ final class BarButton: NSView {
     private let iconView = NSImageView()
     private let label = NSTextField(labelWithString: "")
     private let runningDot = NSView()
-    private let badgeView = BadgeView()
+    private lazy var badgeView = BadgeView(compact: kind == .pin)
     /// The visible background. The button itself spans the bar's full height, so it is clickable down to the screen edge.
     private let plate = NSView()
     private var highlighted = false
@@ -107,9 +107,9 @@ final class BarButton: NSView {
         let height = plate.frame.height, mid = bounds.midY
         switch kind {
         case .pin:
-            let size = min(height - 10, 26)
+            let size = bounds.height
             iconView.frame = NSRect(x: (bounds.width - size) / 2, y: mid - size / 2, width: size, height: size)
-            runningDot.frame = NSRect(x: (bounds.width - 3) / 2, y: max(iconView.frame.minY - 5, plate.frame.minY + 1), width: 3, height: 3)
+            runningDot.frame = NSRect(x: (bounds.width - 3) / 2, y: 1, width: 3, height: 3)
         case .window:
             let size = min(height - 2, 40)
             iconView.frame = NSRect(x: 2, y: mid - size / 2, width: size, height: size)
@@ -117,7 +117,13 @@ final class BarButton: NSView {
         case .overflow:
             label.frame = NSRect(x: 0, y: mid - 8, width: bounds.width, height: 16)
         }
-        if kind != .overflow, !badgeView.isHidden {
+        if kind == .pin, !badgeView.isHidden {
+            // Inside the visible icon's top-right corner, so it never covers a neighbour
+            let size = badgeView.fittingSize
+            let visible = iconView.frame.insetBy(dx: iconView.frame.width * 0.1, dy: iconView.frame.height * 0.1)
+            badgeView.frame = NSRect(x: bounds.width - size.width, y: min(visible.maxY - size.height + 3, bounds.height - size.height),
+                                     width: size.width, height: size.height).integral
+        } else if kind == .window, !badgeView.isHidden {
             let size = badgeView.fittingSize
             let icon = iconView.frame
             badgeView.frame = NSRect(x: min(icon.maxX - size.width * 0.6, bounds.width - size.width), y: min(icon.maxY - size.height * 0.8, plate.frame.maxY - size.height),
@@ -154,7 +160,10 @@ final class BarButton: NSView {
 
     private func updateBackground() {
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            let color: NSColor = highlighted ? .controlAccentColor.withAlphaComponent(0.35)
+            let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            let focused = dark ? NSColor.controlAccentColor.withAlphaComponent(0.35)
+                : NSColor.controlAccentColor.blended(withFraction: 0.8, of: .white)?.withAlphaComponent(0.85) ?? .controlAccentColor.withAlphaComponent(0.15)
+            let color: NSColor = highlighted ? focused
                 : hovering ? .labelColor.withAlphaComponent(0.12) : .clear
             plate.layer?.backgroundColor = color.cgColor
             runningDot.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.7).cgColor
@@ -163,22 +172,26 @@ final class BarButton: NSView {
 }
 
 /// The red Dock badge on an app icon: a count, or a dot when the app sets one.
+/// Compact badges, on pinned apps, are smaller and cap counts at 9+ to stay within their icon.
 final class BadgeView: NSView {
     private let label = NSTextField(labelWithString: "")
+    private let compact: Bool
 
     var text: String? {
         didSet {
             // Like Windows, big counts show as 99+; other long text is cut to fit the icon
-            label.stringValue = text.flatMap { Int($0) }.map { $0 > 99 ? "99+" : "\($0)" } ?? text ?? ""
+            let cap = compact ? 9 : 99
+            label.stringValue = text.flatMap { Int($0) }.map { $0 > cap ? "\(cap)+" : "\($0)" } ?? text ?? ""
             isHidden = text == nil
         }
     }
 
-    override init(frame: NSRect) {
-        super.init(frame: frame)
+    init(compact: Bool) {
+        self.compact = compact
+        super.init(frame: .zero)
         wantsLayer = true
         layer?.backgroundColor = NSColor.systemRed.cgColor
-        label.font = .systemFont(ofSize: 10, weight: .semibold)
+        label.font = .systemFont(ofSize: compact ? 8.5 : 10, weight: .semibold)
         label.textColor = .white
         label.alignment = .center
         label.lineBreakMode = .byTruncatingTail
@@ -189,8 +202,8 @@ final class BadgeView: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     override var fittingSize: NSSize {
-        let height: CGFloat = 16
-        return NSSize(width: min(max(height, ceil(label.intrinsicContentSize.width) + 8), 30), height: height)
+        let height: CGFloat = compact ? 13 : 16
+        return NSSize(width: min(max(height, ceil(label.intrinsicContentSize.width) + (compact ? 6 : 8)), compact ? 20 : 30), height: height)
     }
 
     override func layout() {
@@ -233,6 +246,10 @@ final class BarPanel: NSPanel {
 final class Bar {
     /// Space between the bar's edges and the buttons' visible background.
     static let inset: CGFloat = 4
+
+    /// Pin icons are as tall as the bar. macOS app icons leave a transparent margin of about a tenth on each side,
+    /// so pins are 80% as wide as their icons plus a small gap, and the running dot sits in the bottom margin.
+    static func pinWidth(barHeight: CGFloat) -> CGFloat { (barHeight * 0.8).rounded() + 4 }
     weak var delegate: BarDelegate?
     private let panel = BarPanel()
     private let background = BarBackground()
@@ -288,11 +305,14 @@ final class Bar {
     func update(pins: [PinnedApp], items: [BarItem], trusted: Bool) {
         content = (pins, items, trusted)
         guard !isDragging else { return }  // applied when the drag ends
-        let gap: CGFloat = 3, pinWidth: CGFloat = 34
-        let height = background.bounds.height
-        var x: CGFloat = 8
+        let height = background.bounds.height, width = background.bounds.width
+        let gap: CGFloat = 3, pinWidth = Bar.pinWidth(barHeight: height)
+        let pinsX = width - 8 - CGFloat(pins.count) * pinWidth
+        let windowsEnd = pins.isEmpty ? width - 8 : pinsX - 12
+        let x: CGFloat = 8
 
         var pinKeys = Set<String>()
+        var pinX = pinsX
         for pin in pins {
             pinKeys.insert(pin.url.path)
             let button = pinButtons[pin.url.path] ?? add(BarButton(kind: .pin, bar: self))
@@ -300,9 +320,9 @@ final class Bar {
             button.pin = pin
             button.configure(icon: pin.icon, title: nil, toolTip: pin.name, badge: pin.badge)
             button.running = pin.running
-            let frame = NSRect(x: x, y: 0, width: pinWidth, height: height)
+            let frame = NSRect(x: pinX, y: 0, width: pinWidth, height: height)
             if button.frame != frame { button.frame = frame }
-            x += pinWidth
+            pinX += pinWidth
         }
         for (key, button) in pinButtons where !pinKeys.contains(key) {
             button.removeFromSuperview()
@@ -310,19 +330,18 @@ final class Bar {
         }
         separator.isHidden = pins.isEmpty
         if !pins.isEmpty {
-            separator.frame = NSRect(x: x + 4, y: Bar.inset + 6, width: 1, height: height - 2 * Bar.inset - 12)
-            x += 12
+            separator.frame = NSRect(x: pinsX - 6, y: Bar.inset + 6, width: 1, height: height - 2 * Bar.inset - 12)
         }
 
         warningButton.isHidden = trusted
         if !trusted {
             if warningButton.superview == nil { background.addSubview(warningButton) }
             warningButton.configure(icon: NSImage(named: NSImage.cautionName), title: "WindowBar needs Accessibility access. Click to open Settings.", toolTip: nil)
-            warningButton.frame = NSRect(x: x, y: 0, width: 440, height: height)
+            warningButton.frame = NSRect(x: x, y: 0, width: max(min(440, windowsEnd - x), 0), height: height)
         }
         let visibleItems = trusted ? items : []
 
-        let layout = BarLayout.windows(count: visibleItems.count, available: background.bounds.width - x - 8, gap: gap)
+        let layout = BarLayout.windows(count: visibleItems.count, available: windowsEnd - x, gap: gap)
         let shown = Array(visibleItems.prefix(layout.shown))
         overflowItems = Array(visibleItems.dropFirst(layout.shown))
         buttonWidth = layout.width

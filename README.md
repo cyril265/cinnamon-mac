@@ -18,19 +18,20 @@ WindowBar needs Accessibility access to see and control windows, and uses undocu
 
 ## Use
 
-- **Left:** exactly the Dock's pinned apps, Finder first. Click to open. A pinned app is hidden on every bar while it has a window button on any of them; its window buttons take over. When its last window closes, the pin returns.
+- **Left:** one button per window on that screen's current desktop, in the order they were opened.
+  - Click: bring that window to the front. Click the active window: minimize it.
+  - Minimizing the active window, from the bar or with its own yellow button, activates the window right under it, as on Windows. Quick repeated clicks alternate between minimize and restore.
+  - Drag sideways: reorder. Escape or releasing outside the bar cancels. The order survives desktop switches and restarts of WindowBar.
+  - Right-click: Minimize/Restore, Close Window, Quit app.
+  - Dimmed: minimized, or its app is hidden.
+  - A red badge (a count or a dot) is the app's Dock badge, such as unread messages.
+  - Too many windows: the rest are behind the **+N** button at the end.
+- **Right:** exactly the Dock's pinned apps, Finder first. Click to open. A pinned app is hidden on every bar while it has a window button on any of them; its window buttons take over. When its last window closes, the pin returns.
   - A dot under an icon means the app is running, as in the Dock.
-  - A red badge on an icon (a count or a dot) is the app's Dock badge, such as unread messages. Window buttons show their app's badge too.
+  - A small red badge in an icon's corner is the app's Dock badge. Counts above 9 show as 9+.
   - Right-click: Open (New Window), Keep in Dock, Show in Finder, and Quit while it's running. Window buttons have Keep in Dock and Show in Finder too.
   - Keep in Dock changes the Dock's own pin list (`com.apple.dock` `persistent-apps`) and restarts the Dock, like `dockutil`. The previous list is saved to `~/Library/Application Support/WindowBar/dock-persistent-apps-backup.plist`. A second change within 5 seconds waits, because the Dock rewrites its list right after a restart.
   - Running apps that aren't pinned and have no window button (no window, or only on other desktops) appear after the pins with a dot. Clicking one opens a window or switches to its desktop, like clicking it in the Dock.
-- **Right:** one button per window on that screen's current desktop, in the order they were opened.
-  - Click: bring that window to the front. Click the active window: minimize it.
-  - Minimizing the active window, from the bar or with its own yellow button, activates the window right under it, as on Windows. Quick repeated clicks alternate between minimize and restore.
-  - Drag sideways: reorder. Escape or releasing outside the bar cancels. The order survives desktop switches, not a restart of WindowBar.
-  - Right-click: Minimize/Restore, Close Window, Quit app.
-  - Dimmed: minimized, or its app is hidden.
-  - Too many windows: the rest are behind the **+N** button at the end.
 - **Green button:** maximizes the window, as on Windows, instead of entering full screen: full width, from the menu bar down to the bar. Click it again to restore the previous size and position. Option-click enters full screen. Windows in full screen, and windows whose green button only zooms, keep the macOS behavior. Hovering still shows the macOS tiling menu.
 - Right-click an empty part of the bar: Copy Diagnostics, Quit WindowBar. It starts again at the next login.
 

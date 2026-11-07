@@ -3,6 +3,10 @@
 ## Unreleased
 
 ### Changed
+- Pinned apps sit at the right end of the bar, window buttons start at the left.
+- In light mode the active window's button has a lighter, paler accent background.
+- Pinned app icons show a smaller Dock badge in their top-right corner, with counts above 9 as 9+, so it never covers the next icon.
+- Pinned app icons fill the bar's height with a small gap between them.
 - Window buttons keep their order across WindowBar restarts and logins. The order is saved in WindowBar's preferences (`windowOrder`).
 - New windows appear in the order they were opened, also when WindowBar finds several at once, such as at startup.
 - A window that disappears briefly (an app redrawing it, a hiccup in macOS Accessibility) gets its old place back if it returns within 60 seconds. Before, it moved to the end of the bar.
