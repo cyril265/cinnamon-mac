@@ -307,8 +307,9 @@ final class Bar {
         guard !isDragging else { return }  // applied when the drag ends
         let height = background.bounds.height, width = background.bounds.width
         let gap: CGFloat = 3, pinWidth = Bar.pinWidth(barHeight: height)
-        let pinsX = width - 8 - CGFloat(pins.count) * pinWidth
-        let windowsEnd = pins.isEmpty ? width - 8 : pinsX - 12
+        // Visible pin icons sit 2pt inside their buttons: 6pt from the bar's end, 6pt on both sides of the separator
+        let pinsX = width - 4 - CGFloat(pins.count) * pinWidth
+        let windowsEnd = pins.isEmpty ? width - 8 : pinsX - 11
         let x: CGFloat = 8
 
         var pinKeys = Set<String>()
@@ -330,7 +331,7 @@ final class Bar {
         }
         separator.isHidden = pins.isEmpty
         if !pins.isEmpty {
-            separator.frame = NSRect(x: pinsX - 6, y: Bar.inset + 6, width: 1, height: height - 2 * Bar.inset - 12)
+            separator.frame = NSRect(x: pinsX - 5, y: Bar.inset + 6, width: 1, height: height - 2 * Bar.inset - 12)
         }
 
         warningButton.isHidden = trusted
