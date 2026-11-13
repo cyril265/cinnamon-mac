@@ -24,9 +24,11 @@ WindowBar needs Accessibility access to see and control windows, and uses undocu
   - Drag sideways: reorder. Escape or releasing outside the bar cancels. The order survives desktop switches and restarts of WindowBar.
   - Right-click: Minimize/Restore, Close Window, Quit app.
   - Dimmed: minimized, or its app is hidden.
+  - Apps that hide themselves when you click a window's red close button, like Discord, lose that window's button: the app moves to the right as a running app until it's shown again.
   - A red badge (a count or a dot) is the app's Dock badge, such as unread messages.
-  - Too many windows: the rest are behind the **+N** button at the end.
-- **Right:** exactly the Dock's pinned apps, Finder first. Click to open. A pinned app is hidden on every bar while it has a window button on any of them; its window buttons take over. When its last window closes, the pin returns.
+  - Bar full: as Windows' "Combine when taskbar is full", an app's windows share one button showing the app's name and its window count, the app with the most windows first, until every button is at least 120 pt wide. Click it to pick a window, right-click for Close All Windows and the app's options. If the bar is still full, the rest are behind the **+N** button at the end.
+- **Right (and left), the launchers:** the Dock's pinned apps, Finder first, followed by running apps without a window button and apps set to Keep in Launchers. Click to open. Drag sideways to reorder, as with window buttons; the order is WindowBar's own and survives restarts, the Dock keeps its order. An app keeps its place while its icon is hidden; newly pinned apps go at the end. A pinned app is hidden on every bar while it has a window button on any of them; its window buttons take over. When its last window closes, the pin returns. Right-click → **Keep in Launchers** moves an app to the launchers for good: its windows get no window buttons and its launcher stays: always if it's pinned, while it runs if not. Click the launcher to bring the app forward.
+  - Two launcher areas: one at the right end of the bar, where every app starts, and one at the left end, before the window buttons. Drag an icon to the other end of the bar to move it there, or right-click → **Move to Left Side** / **Move to Right Side**. The left area only shows while it has icons. An app keeps its side while its icon is hidden; WindowBar saves it in its preferences (`leftLaunchers`).
   - A dot under an icon means the app is running, as in the Dock.
   - A small red badge in an icon's corner is the app's Dock badge. Counts above 9 show as 9+.
   - Right-click: Open (New Window), Keep in Dock, Show in Finder, and Quit while it's running. Window buttons have Keep in Dock and Show in Finder too.
@@ -50,7 +52,7 @@ The install is atomic: the previous version is kept and restored if the new one 
 
 | File | Contents |
 |---|---|
-| `Sources/Model.swift` | Pure logic, unit tested: display assignment, resize rule, window order, overflow layout |
+| `Sources/Model.swift` | Pure logic, unit tested: display assignment, resize rule, window order, overflow layout, combining an app's windows |
 | `Sources/Private.swift` | Undocumented macOS functions, looked up at runtime |
 | `Sources/WindowWorker.swift` | All Accessibility work on its own thread: observers, window records, focus, resizing, maximizing |
 | `Sources/GreenButton.swift` | Mouse event tap that turns green-button clicks into maximize |
@@ -85,6 +87,7 @@ The Accessibility permission is tied to the app's code signature. `setup-signing
 - Native tabs: only the selected tab of a tab group gets a button.
 - Custom order is not saved across restarts of WindowBar.
 - An app that refuses to be resized keeps its bottom edge under the bar.
+- An app that hides itself on ⌘W instead of the red close button keeps a dimmed window button.
 - No window previews.
 - Maximized windows don't follow later changes of the bar height or the menu bar.
 

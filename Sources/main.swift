@@ -60,7 +60,17 @@ final class AppController: NSObject, NSApplicationDelegate, BarDelegate {
     private static let orderDefaultsKey = "windowOrder"
     private var savedOrder = UserDefaults.standard.stringArray(forKey: orderDefaultsKey) ?? []
     private lazy var order = TaskOrder(saved: savedOrder)
-    private var pins: [PinnedApp] = []
+    private static let launcherOrderDefaultsKey = "launcherOrder"
+    private var launcherOrder = LauncherOrder(saved: UserDefaults.standard.stringArray(forKey: launcherOrderDefaultsKey) ?? [])
+    /// Apps that only get a launcher, never window buttons, by app key.
+    private static let keptLaunchersDefaultsKey = "keptLaunchers"
+    private var keptLaunchers = Set(UserDefaults.standard.stringArray(forKey: keptLaunchersDefaultsKey) ?? [])
+    /// Apps whose launcher sits at the bar's left end, by app key. All others are on the right.
+    private static let leftLaunchersDefaultsKey = "leftLaunchers"
+    private var leftLaunchers = Set(UserDefaults.standard.stringArray(forKey: leftLaunchersDefaultsKey) ?? [])
+    /// The launchers as the bars show them, by app key.
+    private var launcherSides: (left: [String], right: [String]) = ([], [])
+    private var pins: [Launcher] = []
     private var meta: [pid_t: AppMeta] = [:]
     private var trusted = false
     private var topologyWork: DispatchWorkItem?
@@ -69,6 +79,8 @@ final class AppController: NSObject, NSApplicationDelegate, BarDelegate {
     private var escapeMonitor: Any?
     private var terminationSource: DispatchSourceSignal?
     private var diagnosticsSource: DispatchSourceSignal?
+    /// The open list of a combined button or the +N button: closed windows leave it while it stays open.
+    private weak var windowList: WindowListMenu?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         trusted = AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary)
@@ -76,6 +88,7 @@ final class AppController: NSObject, NSApplicationDelegate, BarDelegate {
         worker.onSnapshot = { [weak self] in self?.apply($0) }
         worker.start()
         greenButton.onClick = { [worker] window, pid, fullScreen in worker.greenButton(window, pid: pid, fullScreen: fullScreen) }
+        greenButton.onClose = { [worker] window, pid in worker.closeButton(window, pid: pid) }
         greenButton.start()
         badges.onChange = { [weak self] in
             self?.badge = $0
@@ -229,6 +242,13 @@ final class AppController: NSObject, NSApplicationDelegate, BarDelegate {
         order.sync(snapshot.windows.map(\.id)) { id in "\(id.pid):\(Int(launches[id].flatMap { $0 }?.timeIntervalSince1970 ?? 0)):\(id.window)" }
         saveOrder()
         render()
+        let alive = Set(snapshot.windows.map(\.id))
+        windowList?.removeRows { !alive.contains($0) }
+    }
+
+    /// The windows that get a button. Apps set to Keep in Launchers get none, only their launcher.
+    private func buttonWindows() -> [WindowSnapshot] {
+        world.windows.filter { $0.visible && !(meta[$0.id.pid]?.key.map(keptLaunchers.contains) ?? false) }
     }
 
     private func render() {
@@ -237,31 +257,37 @@ final class AppController: NSObject, NSApplicationDelegate, BarDelegate {
         // button anywhere (no window, or only on other desktops) get an icon after the pins. Clicking one opens a window.
         let running = Set(meta.values.compactMap(\.key))
         let pinned = Set(pins.map(\.key))
-        let withButtons = Set(world.windows.filter(\.visible).compactMap { meta[$0.id.pid]?.key })
+        let shown = buttonWindows()
+        let withButtons = Set(shown.compactMap { meta[$0.id.pid]?.key })
         var listed = pinned.union(withButtons)
         // One icon per app, also when several instances of it run
-        let unpinned = meta.values.sorted { ($0.launch ?? .distantPast) < ($1.launch ?? .distantPast) }.compactMap { app -> PinnedApp? in
+        let unpinned = meta.values.sorted { ($0.launch ?? .distantPast) < ($1.launch ?? .distantPast) }.compactMap { app -> Launcher? in
             guard let key = app.key, let url = app.url, listed.insert(key).inserted else { return nil }
-            return PinnedApp(url: url, key: key, name: app.name, icon: app.icon, running: true, badge: badge[key])
+            return Launcher(url: url, key: key, name: app.name, icon: app.icon, running: true, badge: badge[key])
         }
         // A pinned app gives way to its window buttons on every bar while it has a window on any of them
-        let launchers = pins.filter { !withButtons.contains($0.key) }.map { pin -> PinnedApp in
+        let icons = pins.filter { !withButtons.contains($0.key) }.map { pin -> Launcher in
             var pin = pin
             pin.running = running.contains(pin.key)
             pin.badge = badge[pin.key]
             return pin
         } + unpinned
+        let byKey = Dictionary(icons.map { ($0.key, $0) }, uniquingKeysWith: { first, _ in first })
+        let launchers = launcherOrder.sorted(icons.map(\.key)).compactMap { byKey[$0] }
+        let left = launchers.filter { leftLaunchers.contains($0.key) }, right = launchers.filter { !leftLaunchers.contains($0.key) }
+        launcherSides = (left.map(\.key), right.map(\.key))
 
         for display in displays {
             guard let bar = bars[display.uuid], !bar.isDragging else { continue }
-            let ids = order.sorted(world.windows.filter { $0.visible && $0.display == display.uuid }.map(\.id))
+            let ids = order.sorted(shown.filter { $0.display == display.uuid }.map(\.id))
             let items = ids.compactMap { id -> BarItem? in
                 guard let window = windows[id] else { return nil }
                 let app = meta[id.pid]
                 return BarItem(id: id, title: window.title.isEmpty ? app?.name ?? "" : window.title, icon: app?.icon ?? NSImage(),
-                               focused: world.focused == id, dimmed: window.minimized || window.hidden, badge: app?.key.flatMap { badge[$0] })
+                               focused: world.focused == id, dimmed: window.minimized || window.hidden, badge: app?.key.flatMap { badge[$0] },
+                               app: app?.key ?? "pid:\(id.pid)", appName: app?.name ?? "")
             }
-            bar.update(pins: launchers, items: items, trusted: trusted)
+            bar.update(left: left, right: right, items: items, trusted: trusted)
         }
     }
 
@@ -270,12 +296,12 @@ final class AppController: NSObject, NSApplicationDelegate, BarDelegate {
     }
 
     /// Exactly the Dock's pinned apps, Finder first, as the Dock shows them.
-    private func loadPins() -> [PinnedApp] {
+    private func loadPins() -> [Launcher] {
         let known = Dictionary(pins.map { ($0.url.standardizedFileURL.path, $0) }, uniquingKeysWith: { first, _ in first })
         return Dock.pinnedApps().map { url in
             let path = url.standardizedFileURL.path
             if let pin = known[path] { return pin }
-            return PinnedApp(url: url, key: Bundle(url: url)?.bundleIdentifier ?? path,
+            return Launcher(url: url, key: Bundle(url: url)?.bundleIdentifier ?? path,
                              name: FileManager.default.displayName(atPath: path).replacingOccurrences(of: ".app", with: ""),
                              icon: appIcon(url))
         }
@@ -286,7 +312,7 @@ final class AppController: NSObject, NSApplicationDelegate, BarDelegate {
         render()
     }
 
-    /// The Dock's per-app options: Keep in Dock (pin/unpin through the Dock itself) and Show in Finder.
+    /// The per-app options: Keep in Dock (pin/unpin through the Dock itself), Keep in Launchers and Show in Finder.
     private func appOptions(url: URL?, key: String?) -> [NSMenuItem] {
         guard let url else { return [] }
         var items: [NSMenuItem] = []
@@ -299,6 +325,16 @@ final class AppController: NSObject, NSApplicationDelegate, BarDelegate {
             keep.state = Dock.isPinned(url) ? .on : .off
             items.append(keep)
         }
+        if let key {
+            let kept = MenuAction("Keep in Launchers") { [weak self] in
+                guard let self else { return }
+                if keptLaunchers.remove(key) == nil { keptLaunchers.insert(key) }
+                UserDefaults.standard.set(keptLaunchers.sorted(), forKey: Self.keptLaunchersDefaultsKey)
+                render()
+            }
+            kept.state = keptLaunchers.contains(key) ? .on : .off
+            items.append(kept)
+        }
         items.append(MenuAction("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([url]) })
         return items
     }
@@ -307,13 +343,25 @@ final class AppController: NSObject, NSApplicationDelegate, BarDelegate {
 
     func bar(_ bar: Bar, clicked id: WindowID) { worker.click(id) }
 
-    func bar(_ bar: Bar, open pin: PinnedApp) {
-        NSWorkspace.shared.openApplication(at: pin.url, configuration: .init())
+    func bar(_ bar: Bar, open launcher: Launcher) {
+        NSWorkspace.shared.openApplication(at: launcher.url, configuration: .init())
     }
 
-    func bar(_ bar: Bar, moved id: WindowID, to index: Int, among ids: [WindowID]) {
-        order.move(id, to: index, among: ids)
+    func bar(_ bar: Bar, arranged ids: [WindowID]) {
+        order.arrange(ids)
         saveOrder()
+    }
+
+    func bar(_ bar: Bar, movedApp key: String, to index: Int, among keys: [String], left: Bool) {
+        moveLauncher(key, to: index, among: keys, left: left)
+    }
+
+    /// Puts an app's launcher at `index` among `keys`, the launchers shown on the side it goes to.
+    private func moveLauncher(_ key: String, to index: Int, among keys: [String], left: Bool) {
+        if left { leftLaunchers.insert(key) } else { leftLaunchers.remove(key) }
+        UserDefaults.standard.set(leftLaunchers.sorted(), forKey: Self.leftLaunchersDefaultsKey)
+        launcherOrder.move(key, to: index, among: keys, known: pins.map(\.key))
+        UserDefaults.standard.set(launcherOrder.keys, forKey: Self.launcherOrderDefaultsKey)
     }
 
     private func saveOrder() {
@@ -344,26 +392,56 @@ final class AppController: NSObject, NSApplicationDelegate, BarDelegate {
         return menu
     }
 
-    func bar(_ bar: Bar, menuFor pin: PinnedApp) -> NSMenu {
+    func bar(_ bar: Bar, menuFor launcher: Launcher) -> NSMenu {
         let menu = NSMenu()
-        menu.addItem(MenuAction(pin.running ? "Open New Window" : "Open") { NSWorkspace.shared.openApplication(at: pin.url, configuration: .init()) })
+        menu.addItem(MenuAction(launcher.running ? "Open New Window" : "Open") { NSWorkspace.shared.openApplication(at: launcher.url, configuration: .init()) })
         menu.addItem(.separator())
-        appOptions(url: pin.url, key: pin.key).forEach(menu.addItem)
-        let instances = NSWorkspace.shared.runningApplications.filter { ($0.bundleIdentifier ?? $0.bundleURL?.standardizedFileURL.path) == pin.key }
+        appOptions(url: launcher.url, key: launcher.key).forEach(menu.addItem)
+        // To the other side, next to the window buttons
+        let onLeft = leftLaunchers.contains(launcher.key)
+        menu.addItem(MenuAction(onLeft ? "Move to Right Side" : "Move to Left Side") { [weak self] in
+            guard let self else { return }
+            if onLeft {
+                moveLauncher(launcher.key, to: 0, among: launcherSides.right, left: false)
+            } else {
+                moveLauncher(launcher.key, to: launcherSides.left.count, among: launcherSides.left, left: true)
+            }
+            render()
+        })
+        let instances = NSWorkspace.shared.runningApplications.filter { ($0.bundleIdentifier ?? $0.bundleURL?.standardizedFileURL.path) == launcher.key }
         // Finder can't be quit; macOS relaunches it
-        if !instances.isEmpty && pin.key != "com.apple.finder" {
+        if !instances.isEmpty && launcher.key != "com.apple.finder" {
             menu.addItem(.separator())
-            menu.addItem(MenuAction("Quit \(pin.name)") { instances.forEach { $0.terminate() } })
+            menu.addItem(MenuAction("Quit \(launcher.name)") { instances.forEach { $0.terminate() } })
         }
         return menu
     }
 
-    func bar(_ bar: Bar, overflowMenuFor items: [BarItem]) -> NSMenu {
+    /// The windows of a combined app button: Close All Windows, the app's options and Quit.
+    func bar(_ bar: Bar, menuForGroup ids: [WindowID]) -> NSMenu {
         let menu = NSMenu()
+        menu.addItem(MenuAction("Close All Windows") { [weak self] in ids.forEach { self?.worker.close($0) } })
+        menu.addItem(.separator())
+        let app = ids.first.flatMap { meta[$0.pid] }
+        appOptions(url: app?.url, key: app?.key).forEach(menu.addItem)
+        menu.addItem(.separator())
+        let pids = Set(ids.map(\.pid))
+        let instances = NSWorkspace.shared.runningApplications.filter { running in
+            if let key = app?.key { return (running.bundleIdentifier ?? running.bundleURL?.standardizedFileURL.path) == key }
+            return pids.contains(running.processIdentifier) && running.launchDate == meta[running.processIdentifier]?.launch
+        }
+        menu.addItem(MenuAction("Quit \(app?.name ?? "App")") { instances.forEach { $0.terminate() } })
+        return menu
+    }
+
+    func bar(_ bar: Bar, listing items: [BarItem]) -> NSMenu {
+        let menu = WindowListMenu()
+        windowList = menu
         for item in items {
-            let icon = item.icon.copy() as? NSImage
-            icon?.size = NSSize(width: 16, height: 16)
-            menu.addItem(MenuAction(item.title, image: icon) { [weak self] in self?.worker.focus(item.id) })
+            let focus: () -> Void = { [weak self] in self?.worker.focus(item.id) }
+            let entry = MenuAction(item.title, focus)
+            entry.view = WindowMenuRow(item: item, onSelect: focus, onClose: { [weak self] in self?.worker.close(item.id) })
+            menu.addItem(entry)
         }
         return menu
     }
@@ -386,7 +464,8 @@ final class AppController: NSObject, NSApplicationDelegate, BarDelegate {
 
     private func diagnostics(_ completion: @escaping (String) -> Void) {
         let header = ["WindowBar diagnostics \(Date())", "green button tap: \(greenButton.active)", "bars: \(bars.count), pins: \(pins.count), ordered windows: \(order.ids.count)",
-                      "shown per display: " + displays.map { d in "\(d.uuid.prefix(8))=\(world.windows.filter { $0.visible && $0.display == d.uuid }.count)" }.joined(separator: " "),
+                      "shown per display: " + displays.map { d in "\(d.uuid.prefix(8))=\(buttonWindows().filter { $0.display == d.uuid }.count)" }.joined(separator: " "),
+                      "kept launchers: \(keptLaunchers.count), left launchers: \(leftLaunchers.count)",
                       "snapshot focused: \(world.focused.map { "\($0)" } ?? "-")"]
         worker.diagnostics { text in completion((header + [text]).joined(separator: "\n")) }
     }

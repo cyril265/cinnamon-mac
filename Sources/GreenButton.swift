@@ -15,6 +15,9 @@ private let tapCallback: CGEventTapCallBack = { _, type, event, refcon in
 final class GreenButton {
     /// The window whose green button was clicked, its app, and whether to enter full screen instead.
     var onClick: (AXUIElement, pid_t, Bool) -> Void = { _, _, _ in }
+    /// A completed click on a window's close button, passed on to the app. Some apps, like Discord, hide themselves
+    /// instead of closing.
+    var onClose: (AXUIElement, pid_t) -> Void = { _, _ in }
 
     private var tap: CFMachPort?
     private var runLoop: CFRunLoop?
@@ -22,6 +25,8 @@ final class GreenButton {
     private let installed = OSAllocatedUnfairLock(initialState: false)
     /// The mouse-down went to WindowBar, so its drags and mouse-up must not reach the app either.
     private var swallowing = false
+    /// A close button pressed and not yet released: it only counts if released over the same button, as the app sees it.
+    private var pressedClose: (button: AXUIElement, window: AXUIElement, pid: pid_t)?
 
     var active: Bool { installed.withLock { $0 } }
 
@@ -61,28 +66,50 @@ final class GreenButton {
         case .tapDisabledByTimeout, .tapDisabledByUserInput:
             if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
             swallowing = false
+            pressedClose = nil
             return pass
         case .leftMouseDown:
             swallowing = false
+            pressedClose = nil
             let modifiers = event.flags.intersection([.maskCommand, .maskControl, .maskShift, .maskAlternate])
-            guard modifiers.isEmpty || modifiers == .maskAlternate,
-                  let (window, pid) = greenButtonWindow(at: event.location) else { return pass }
-            swallowing = true
-            onClick(window, pid, modifiers == .maskAlternate)
-            return nil
+            switch titleButton(at: event.location, green: modifiers.isEmpty || modifiers == .maskAlternate) {
+            case .close(let button, let window, let pid)?:
+                pressedClose = (button, window, pid)
+                return pass
+            case .green(let window, let pid)?:
+                swallowing = true
+                onClick(window, pid, modifiers == .maskAlternate)
+                return nil
+            case nil:
+                return pass
+            }
         case .leftMouseDragged:
             return swallowing ? nil : pass
         case .leftMouseUp:
             defer { swallowing = false }
+            if let pressed = pressedClose {
+                pressedClose = nil
+                var hit: AXUIElement?
+                if AXUIElementCopyElementAtPosition(AXUIElementCreateSystemWide(), Float(event.location.x), Float(event.location.y), &hit) == .success,
+                   let hit, CFEqual(hit, pressed.button) {
+                    onClose(pressed.window, pressed.pid)
+                }
+            }
             return swallowing ? nil : pass
         default:
             return pass
         }
     }
 
-    /// The window whose full-screen green button is at `point`, if it can be resized. Accessibility is only asked when
-    /// the click is near the top-left corner of some app window, so other clicks cost nothing.
-    private func greenButtonWindow(at point: CGPoint) -> (AXUIElement, pid_t)? {
+    private enum TitleButton {
+        case green(AXUIElement, pid_t)
+        case close(button: AXUIElement, window: AXUIElement, pid: pid_t)
+    }
+
+    /// The window whose close button or full-screen green button is at `point`; the green button only if `green` and the
+    /// window can be resized. Accessibility is only asked when the click is near the top-left corner of some app window,
+    /// so other clicks cost nothing.
+    private func titleButton(at point: CGPoint, green: Bool) -> TitleButton? {
         // macOS keeps transparent click-through windows above all apps (Dock, Notification Center, screenshots), so the
         // window list can't tell which window gets the click. It only rules clicks out; Accessibility's hit test decides.
         let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
@@ -101,8 +128,10 @@ final class GreenButton {
         if let hit { AXUIElementGetPid(hit, &pid) }
         let subrole = hit.flatMap { string($0, kAXSubroleAttribute) }
         log.debug("click near a window corner: hit \(error.rawValue), pid \(pid), subrole \(subrole ?? "-")")
-        guard error == .success, let hit, subrole == "AXFullScreenButton", pid != getpid(),
+        guard error == .success, let hit, subrole == "AXFullScreenButton" || subrole == kAXCloseButtonSubrole, pid != getpid(),
               let window = element(hit, kAXWindowAttribute) ?? element(hit, kAXParentAttribute) else { return nil }
+        if subrole == kAXCloseButtonSubrole { return .close(button: hit, window: window, pid: pid) }
+        guard green else { return nil }
 
         var fullScreen: CFTypeRef?
         if AXUIElementCopyAttributeValue(window, "AXFullScreen" as CFString, &fullScreen) == .success,
@@ -113,7 +142,7 @@ final class GreenButton {
             return nil
         }
         log.info("green button clicked on a window of \(pid)")
-        return (window, pid)
+        return .green(window, pid)
     }
 
     private func frame(_ info: [String: Any]) -> CGRect? {

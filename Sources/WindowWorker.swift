@@ -144,6 +144,11 @@ final class WindowWorker {
     private var lastClick: (id: WindowID, minimized: Bool, at: Date)?
     /// The window that was active before the current one. A minimize is reported after macOS already moved focus.
     private var lostFocus: (id: WindowID, at: Date)?
+    /// The last click on a window's close button.
+    private var closeClick: (id: WindowID, at: Date)?
+    /// Windows whose close button hid their app instead of closing them, as Discord does: no button until the app is
+    /// shown again, so the app moves to the right like an app without windows.
+    private var dismissed = Set<WindowID>()
     private var journal: [WindowID: Adjustment] = [:]
     /// Windows maximized with the green button: the frame to restore, and the frame the window ended up with.
     private var maximized: [WindowID: (restore: CGRect, applied: CGRect)] = [:]
@@ -210,6 +215,7 @@ final class WindowWorker {
                 if let app = apps[info.pid] {
                     if app.hidden != info.hidden {
                         app.hidden = info.hidden
+                        hiddenChanged(app, hidden: info.hidden)
                         schedule(app: info.pid)
                     }
                 } else {
@@ -311,6 +317,16 @@ final class WindowWorker {
         }
     }
 
+    /// A click on a window's close button. If its app hides itself right after instead of closing the window, the
+    /// window loses its button.
+    func closeButton(_ element: AXUIElement, pid: pid_t) {
+        let at = Date()
+        perform { [self] in
+            guard let app = apps[pid], let record = record(for: element, in: app) else { return }
+            closeClick = (record.id, at)
+        }
+    }
+
     /// A click on a window's green button: maximizes the window on its display, leaving the menu bar and the bar free,
     /// or restores it if it's already maximized. With `fullScreen`, native full screen instead.
     func greenButton(_ element: AXUIElement, pid: pid_t, fullScreen: Bool) {
@@ -346,7 +362,8 @@ final class WindowWorker {
         perform { [self] in
             var lines = ["trusted: \(trusted)", "private APIs: \(Private.status)", "topology generation: \(generation)",
                          "bar height: \(barHeight)", "settling: \(Date() < settleUntil)", "frontmost pid: \(frontmost.map { "\($0)" } ?? "-")",
-                         "spaces: \(spaceMap.owners.count) known, shown \(spaceMap.current.sorted())", "focused: \(focused.map { "\($0)" } ?? "-")"]
+                         "spaces: \(spaceMap.owners.count) known, shown \(spaceMap.current.sorted())", "focused: \(focused.map { "\($0)" } ?? "-")",
+                         "dismissed: \(dismissed.map(\.description).sorted())"]
             lines += displays.map { "display \($0.id) \($0.uuid) frame \($0.frame) usableBottom \($0.usableBottom)" }
             lines += apps.values.sorted { $0.pid < $1.pid }.map {
                 "app \($0.pid).\($0.serial) hidden=\($0.hidden) observer=\($0.observer != nil) observedWindows=\($0.observed.count) backoff=\($0.backoff) quiet=\($0.quiet)"
@@ -395,6 +412,10 @@ final class WindowWorker {
             focusIntent = nil
         }
         if notification == kAXWindowMiniaturizedNotification { activateNext(afterMinimizing: element, pid: pid) }
+        // Straight from the app, so a busy main thread reporting the hide late can't make it miss the close click
+        if notification == kAXApplicationHiddenNotification || notification == kAXApplicationShownNotification, let app = apps[pid] {
+            hiddenChanged(app, hidden: notification == kAXApplicationHiddenNotification)
+        }
         if singleWindowNotifications.contains(notification), let app = apps[pid], let number = Private.windowID(of: element) {
             let id = WindowID(pid: pid, session: app.serial, window: number)
             if records[id] != nil {
@@ -516,9 +537,28 @@ final class WindowWorker {
         // Also adjustments of windows WindowBar lost track of while it had no permission
         journal = journal.filter { $0.key.pid != pid }
         maximized = maximized.filter { $0.key.pid != pid }
+        dismissed = dismissed.filter { $0.pid != pid }
         if focused?.pid == pid { focused = nil }
         if focusIntent?.pid == pid { focusIntent = nil }
         schedule()
+    }
+
+    /// An app hiding itself right after a click on one of its windows' close buttons dismisses that window; showing
+    /// the app brings its dismissed windows back. Called from both NSWorkspace and Accessibility, which can arrive late
+    /// and out of order, so the app's live state decides and `hidden` is only the fallback.
+    private func hiddenChanged(_ app: AppSession, hidden: Bool) {
+        var live: CFTypeRef?
+        let isHidden = AXUIElementCopyAttributeValue(app.element, kAXHiddenAttribute as CFString, &live) == .success
+            ? (live as? NSNumber)?.boolValue ?? hidden : hidden
+        guard isHidden else {
+            dismissed = dismissed.filter { $0.pid != app.pid }
+            if closeClick?.id.pid == app.pid { closeClick = nil }
+            return
+        }
+        guard let click = closeClick, click.id.pid == app.pid, click.id.session == app.serial,
+              records[click.id] != nil, Date().timeIntervalSince(click.at) < 3, !dismissed.contains(click.id) else { return }
+        log.info("window \(click.id.description, privacy: .public) dismissed: its close button hid the app")
+        dismissed.insert(click.id)
     }
 
     private func removeWindow(_ id: WindowID, in app: AppSession, reason: String) {
@@ -527,6 +567,7 @@ final class WindowWorker {
         records[id] = nil
         journal[id] = nil
         maximized[id] = nil
+        dismissed.remove(id)
         unobserve(window: id.window, in: app)
     }
 
@@ -764,7 +805,7 @@ final class WindowWorker {
             // A native tab that isn't selected is a non-minimized window the window server has ordered out
             let inactiveTab = !record.minimized && !hidden && !record.onscreen
             return WindowSnapshot(id: record.id, launch: apps[record.id.pid]?.launch, title: record.title, minimized: record.minimized, hidden: hidden, display: record.display,
-                                  visible: present && current != false && !inactiveTab)
+                                  visible: present && current != false && !inactiveTab && !dismissed.contains(record.id))
         }
         let snapshot = WorldSnapshot(generation: generation, windows: windows, focused: focused)
         guard snapshot != lastPublished else { return }

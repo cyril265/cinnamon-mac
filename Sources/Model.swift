@@ -188,6 +188,57 @@ struct TaskOrder {
         let idByKey = Dictionary(keyByID.map { ($1, $0) }, uniquingKeysWith: { first, _ in first })
         ids = keys.compactMap { idByKey[$0] }
     }
+
+    /// Puts `visible`, the ids one bar shows, in this order. Windows that bar doesn't show keep their place relative to each other.
+    mutating func arrange(_ visible: [WindowID]) {
+        let live = Set(ids)
+        let visible = visible.filter(live.contains)
+        var current = sorted(visible)
+        for (index, id) in visible.enumerated() where index < current.count && current[index] != id {
+            move(id, to: index, among: current)
+            current = sorted(visible)
+        }
+    }
+}
+
+/// The user's order of the launchers, the app icons left and right of the window buttons, by app key, the same on every bar. Kept in WindowBar,
+/// not the Dock. Apps keep their place while they're hidden: a pin while its app has window buttons, a running app
+/// after it quits. Apps the user never placed go after the placed ones, in the order given (Dock pins, then running apps).
+struct LauncherOrder {
+    private(set) var keys: [String]
+
+    init(saved: [String] = []) {
+        var seen = Set<String>()
+        keys = saved.filter { seen.insert($0).inserted }
+    }
+
+    func sorted(_ items: [String]) -> [String] {
+        let wanted = Set(items)
+        return arranged(items).filter { wanted.contains($0) }
+    }
+
+    /// Moves `key` to position `index` among `visible`, the icons as a bar shows them on one side. `key` needn't be
+    /// among them, when it moves to the other side. `known` are the icons that can come back, such as pins hidden by
+    /// their window buttons: they get a place first, so they keep it.
+    mutating func move(_ key: String, to index: Int, among visible: [String], known: [String]) {
+        guard visible.firstIndex(of: key) != index else { return }
+        keys = arranged(known + visible + [key])
+        guard let from = keys.firstIndex(of: key) else { return }
+        let others = visible.filter { $0 != key }
+        keys.remove(at: from)
+        if index < others.count, let anchor = keys.firstIndex(of: others[index]) {
+            keys.insert(key, at: anchor)
+        } else if let last = others.last, let anchor = keys.firstIndex(of: last) {
+            keys.insert(key, at: anchor + 1)
+        } else {
+            keys.append(key)
+        }
+    }
+
+    private func arranged(_ items: [String]) -> [String] {
+        var seen = Set(keys)
+        return keys + items.filter { seen.insert($0).inserted }
+    }
 }
 
 enum BarLayout {
@@ -199,5 +250,26 @@ enum BarLayout {
         let room = available - overflowWidth - gap
         let shown = max(0, Int((room + gap) / (minWidth + gap)))
         return shown == 0 ? (0, 0) : (shown, min(maxWidth, (room + gap) / CGFloat(shown) - gap))
+    }
+
+    /// The apps whose windows share one button, as Windows' "Combine when taskbar is full": only when not every window
+    /// gets a button of at least `minWidth`, the app with the most windows first, until the buttons fit.
+    /// `apps` names each window's app, in bar order.
+    static func combined(_ apps: [String], available: CGFloat, gap: CGFloat, minWidth: CGFloat = 120) -> Set<String> {
+        let fit = Int((available + gap) / (minWidth + gap))
+        var counts: [String: Int] = [:]
+        var first: [String: Int] = [:]
+        for (index, app) in apps.enumerated() {
+            counts[app, default: 0] += 1
+            if first[app] == nil { first[app] = index }
+        }
+        let candidates = counts.filter { $0.value > 1 }.keys.sorted { (counts[$0]!, -first[$0]!) > (counts[$1]!, -first[$1]!) }
+        var buttons = apps.count
+        var combined = Set<String>()
+        for app in candidates where buttons > fit {
+            combined.insert(app)
+            buttons -= counts[app]! - 1
+        }
+        return combined
     }
 }

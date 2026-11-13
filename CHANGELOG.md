@@ -2,7 +2,13 @@
 
 ## Unreleased
 
+### Added
+- When the bar is full, an app's windows share one button with the app's name and window count, like Windows' "Combine when taskbar is full". The app with the most windows is combined first, only as many as needed for every button to be at least 120 pt wide. Click to pick a window from a list; right-click for Close All Windows, the app's options and Quit. Combined buttons can be dragged like window buttons.
+- A second launcher area at the left end of the bar, before the window buttons. Drag a launcher to the other end of the bar, or right-click it → **Move to Left Side** / **Move to Right Side**. The left area only shows while it has icons; each app's side is saved in WindowBar's preferences (`leftLaunchers`).
+- Right-click an app → **Keep in Launchers**: the app only shows as a launcher on the right, also while it has windows; its windows get no window buttons. Works for pinned and unpinned apps, saved in WindowBar's preferences (`keptLaunchers`).
+
 ### Changed
+- The launchers, the app icons on the right, can be dragged sideways to reorder them, running apps that aren't pinned too. The order is WindowBar's own, saved in its preferences (`launcherOrder`); the Dock keeps its order and isn't restarted.
 - Pinned apps sit at the right end of the bar, window buttons start at the left.
 - In light mode the active window's button has a lighter, paler accent background.
 - Pinned app icons show a smaller Dock badge in their top-right corner, with counts above 9 as 9+, so it never covers the next icon.
@@ -20,6 +26,7 @@
 - The log records why each window button was removed: closed, no longer a normal window, app quit, app relaunched, or Accessibility access revoked. View it with `/usr/bin/log show --predicate 'subsystem == "local.windowbar"'`.
 
 ### Fixed
+- Closing Discord's window with its red close button left a dimmed window button, because Discord hides itself instead of closing the window. Now the window button goes away and Discord shows on the right as a running app, until it's shown again. The same applies to other apps that hide themselves when their window is closed.
 - Windows of a busy app could stop being checked, because WindowBar kept retrying the same window.
 - All window buttons could vanish for a moment when macOS didn't answer the window list request.
 - A window that macOS read only partly could get wrong buttons or sizes.
